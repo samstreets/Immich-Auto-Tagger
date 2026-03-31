@@ -1,0 +1,85 @@
+# .github/workflows/docker-publish.yml
+#
+# Builds the immich-auto-tagger image and pushes it to Docker Hub.
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME  — your Docker Hub username (samuelstreets)
+#   DOCKERHUB_TOKEN     — a Docker Hub access token (not your password)
+#                         Create one at: https://hub.docker.com/settings/security
+#
+# Images are tagged:
+#   samuelstreets/immich-auto-tagger:latest       — every push to main
+#   samuelstreets/immich-auto-tagger:<git-sha>    — every push (immutable ref)
+#   samuelstreets/immich-auto-tagger:v1.2.3       — when a vX.Y.Z tag is pushed
+
+name: Build & Push to Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main   # build only (no push) on PRs to catch broken Dockerfiles early
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # -----------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Build-time metadata — generates the tag/label list automatically
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: samuelstreets/immich-auto-tagger
+          tags: |
+            # :latest on every push to main
+            type=raw,value=latest,enable={{is_default_branch}}
+            # :<short-sha> on every push
+            type=sha,prefix=,format=short
+            # :v1.2.3 when a version tag is pushed
+            type=semver,pattern={{version}}
+            # :1.2 (major.minor) when a version tag is pushed
+            type=semver,pattern={{major}}.{{minor}}
+
+      # -----------------------------------------------------------------------
+      # Use QEMU + buildx for multi-platform builds (amd64 + arm64 covers
+      # both regular servers and Raspberry Pi / Apple Silicon hosts)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # Skip login on pull-request runs (secrets not available to forks)
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          # Only push on real commits — not on pull requests
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers in the GitHub Actions cache to speed up rebuilds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

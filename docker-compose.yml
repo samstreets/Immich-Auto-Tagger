@@ -4,15 +4,13 @@
 # Assumes Immich is already running. Attach this service to whichever
 # network your Immich stack uses (default: immich_default).
 # ---------------------------------------------------------------------------
-version: "3.8"
 
 volumes:
   tagger-state:   # persists last_run.json across restarts
 
 services:
   immich-auto-tagger:
-    build:
-      context: .
+    image: samuelstreets/immich-auto-tagger:latest
     container_name: immich_auto_tagger
     environment:
       # ----- Required -------------------------------------------------------
@@ -25,11 +23,12 @@ services:
       INITIAL_SCAN_DAYS: "0"                    # 0 = all assets on first run
       IMMICH_TIMEOUT: "30"
 
+      # ----- Object tagging (optional) --------------------------------------
+      # ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"   # omit to disable object tags
+      # OBJECT_TAG_MAX_LABELS: "5"
+
     volumes:
       - tagger-state:/app/state
-
-    networks:
-      - immich-net
 
     restart: unless-stopped
 
@@ -37,8 +36,3 @@ services:
       resources:
         limits:
           memory: 256M
-
-networks:
-  immich-net:
-    external: true          # join the existing Immich network
-    name: immich_default    # change if your Immich stack uses a different name

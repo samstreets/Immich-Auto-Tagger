@@ -7,11 +7,17 @@ Add new tag strategies here by implementing the TagStrategy protocol.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Protocol
 
+import requests
+
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Protocol — every strategy must implement this
@@ -39,14 +45,13 @@ class DateTagStrategy:
 
     def tags_for_asset(self, asset: dict) -> list[str]:
         raw = (
-            asset.get("exifInfo", {}).get("dateTimeOriginal")
+            (asset.get("exifInfo") or {}).get("dateTimeOriginal")
             or asset.get("fileCreatedAt")
         )
         if not raw:
             return []
 
         try:
-            # Immich returns ISO-8601 strings, potentially with "Z" suffix
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(
                 timezone.utc
             )
@@ -74,9 +79,6 @@ class LocationTagStrategy:
     """
     Produces tags from the location fields Immich already resolves itself:
         location/United Kingdom/England/Warwick
-
-    Immich stores country, state, and city in the asset's exifInfo — no
-    external geocoding service is needed.
     """
 
     def tags_for_asset(self, asset: dict) -> list[str]:
@@ -97,7 +99,7 @@ class LocationTagStrategy:
 
 
 # ---------------------------------------------------------------------------
-# Strategy: Face / people  (live data from Immich — no config file needed)
+# Strategy: Face / people
 # ---------------------------------------------------------------------------
 
 
@@ -109,15 +111,9 @@ class FaceTagStrategy:
     Names come directly from Immich — whatever name you have set on each
     person in the Immich UI is used as-is.  People with no name set are
     silently skipped.
-
-    The asset payload already contains a `people` array (returned by the
-    search/metadata endpoint with `withPeople: true`), so no extra API
-    calls are needed per asset.  Person names are cached for the lifetime
-    of the job run to avoid redundant lookups.
     """
 
     def __init__(self) -> None:
-        # Cache: person_id → name (or None if unnamed)
         self._cache: dict[str, str | None] = {}
 
     def tags_for_asset(self, asset: dict) -> list[str]:
@@ -129,14 +125,11 @@ class FaceTagStrategy:
             if not pid:
                 continue
 
-            # Use name already embedded in the asset payload first
             name: str | None = person.get("name") or None
 
-            # Fall back to cache (populated by previous assets in same run)
             if name is None and pid in self._cache:
                 name = self._cache[pid]
 
-            # If still unknown, try a direct People API call and cache result
             if name is None and pid not in self._cache:
                 name = self._fetch_person_name(pid)
                 self._cache[pid] = name
@@ -147,11 +140,7 @@ class FaceTagStrategy:
         return tags
 
     def _fetch_person_name(self, person_id: str) -> str | None:
-        """
-        Fetch person details from Immich and return their name, or None if
-        unnamed or the call fails.
-        """
-        import immich_api  # local import to avoid circular dependency
+        import immich_api
 
         try:
             data = immich_api.get_person(person_id)
@@ -161,8 +150,309 @@ class FaceTagStrategy:
             return None
 
     def clear_cache(self) -> None:
-        """Call between job runs so renamed people are picked up promptly."""
         self._cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Strategy: Camera make / model
+# ---------------------------------------------------------------------------
+
+
+class CameraTagStrategy:
+    """
+    Produces tags like:
+        camera/Sony/ILCE-7M4
+        camera/Apple/iPhone 15 Pro
+
+    Both `make` and `model` come from exifInfo.  If only one is present a
+    single-level tag is produced (e.g. camera/Sony).
+    """
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        exif = asset.get("exifInfo") or {}
+        make: str | None = exif.get("make")
+        model: str | None = exif.get("model")
+
+        if not make and not model:
+            return []
+
+        parts = []
+        if make:
+            parts.append(make.strip().title())
+        if model:
+            model_clean = model.strip()
+            # Strip leading make word if the model string duplicates it
+            if make and model_clean.lower().startswith(make.strip().lower()):
+                model_clean = model_clean[len(make.strip()):].strip()
+            if model_clean:
+                parts.append(model_clean)
+
+        if not parts:
+            return []
+
+        return ["camera/" + "/".join(parts)]
+
+
+# ---------------------------------------------------------------------------
+# Strategy: Season
+# ---------------------------------------------------------------------------
+
+
+class SeasonTagStrategy:
+    """
+    Produces tags like:
+        season/Spring
+
+    Uses meteorological seasons for the Northern Hemisphere.
+    """
+
+    _MONTH_TO_SEASON: dict[int, str] = {
+        12: "Winter", 1: "Winter",  2: "Winter",
+        3:  "Spring", 4: "Spring",  5: "Spring",
+        6:  "Summer", 7: "Summer",  8: "Summer",
+        9:  "Autumn", 10: "Autumn", 11: "Autumn",
+    }
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        raw = (
+            (asset.get("exifInfo") or {}).get("dateTimeOriginal")
+            or asset.get("fileCreatedAt")
+        )
+        if not raw:
+            return []
+
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+        except ValueError:
+            return []
+
+        season = self._MONTH_TO_SEASON.get(dt.month)
+        return [f"season/{season}"] if season else []
+
+
+# ---------------------------------------------------------------------------
+# Strategy: Day of week
+# ---------------------------------------------------------------------------
+
+
+class DayOfWeekTagStrategy:
+    """
+    Produces tags like:
+        day/Monday
+        day/weekday
+        day/weekend
+    """
+
+    _DAY_NAMES = [
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    ]
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        raw = (
+            (asset.get("exifInfo") or {}).get("dateTimeOriginal")
+            or asset.get("fileCreatedAt")
+        )
+        if not raw:
+            return []
+
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+        except ValueError:
+            return []
+
+        day_name = self._DAY_NAMES[dt.weekday()]
+        group = "weekend" if dt.weekday() >= 5 else "weekday"
+        return [f"day/{day_name}", f"day/{group}"]
+
+
+# ---------------------------------------------------------------------------
+# Strategy: Media type
+# ---------------------------------------------------------------------------
+
+
+class MediaTypeTagStrategy:
+    """
+    Produces tags like:
+        type/photo
+        type/video
+        type/live-photo
+    """
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        if asset.get("livePhotoVideoId"):
+            return ["type/live-photo"]
+
+        raw_type: str = (asset.get("type") or "").upper()
+        mapping = {"IMAGE": "photo", "VIDEO": "video"}
+        label = mapping.get(raw_type)
+        return [f"type/{label}"] if label else []
+
+
+# ---------------------------------------------------------------------------
+# Strategy: File format
+# ---------------------------------------------------------------------------
+
+
+class FileFormatTagStrategy:
+    """
+    Produces tags like:
+        format/JPEG
+        format/ARW
+        format/RAW   ← added for any recognised RAW extension
+
+    Derives the format from the original file name extension.
+    """
+
+    _RAW_EXTENSIONS = {
+        "arw", "cr2", "cr3", "nef", "orf", "raf",
+        "rw2", "dng", "pef", "srw", "x3f", "raw",
+    }
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        filename: str = asset.get("originalFileName") or ""
+        if not filename or "." not in filename:
+            return []
+
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if not ext:
+            return []
+
+        tags = [f"format/{ext.upper()}"]
+        if ext in self._RAW_EXTENSIONS:
+            tags.append("format/RAW")
+
+        return tags
+
+
+# ---------------------------------------------------------------------------
+# Strategy: Object / scene detection via Claude Vision (plain HTTP, no SDK)
+# ---------------------------------------------------------------------------
+
+
+class ObjectTagStrategy:
+    """
+    Uses the Anthropic Messages API over plain HTTP to identify the main
+    subjects/objects in a photo and produces tags like:
+        object/dog
+        object/aeroplane
+        object/sunset
+
+    No third-party Anthropic SDK is required — only the `requests` library
+    already present in requirements.txt.
+
+    Requirements:
+        ANTHROPIC_API_KEY env var must be set.
+
+    Only IMAGE assets are processed; videos are silently skipped.
+    Tune label count with OBJECT_TAG_MAX_LABELS (default 5).
+    """
+
+    _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+    _MODEL = "claude-sonnet-4-20250514"
+    _MAX_LABELS = int(os.environ.get("OBJECT_TAG_MAX_LABELS", "5"))
+    _IMMICH_URL: str = os.environ.get("IMMICH_URL", "").rstrip("/")
+    _IMMICH_API_KEY: str = os.environ.get("IMMICH_API_KEY", "")
+    _ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    _PROMPT = (
+        "Look at this photo and list up to {max_labels} of the most prominent "
+        "objects, animals, vehicles, scenes, or subjects you can see. "
+        "Reply with ONLY a comma-separated list of lowercase singular nouns "
+        "(e.g. dog, aeroplane, mountain, sunset). "
+        "No explanations, no punctuation other than commas."
+    )
+
+    def __init__(self) -> None:
+        if not self._ANTHROPIC_API_KEY:
+            logger.warning(
+                "ObjectTagStrategy: ANTHROPIC_API_KEY not set — "
+                "object tagging disabled."
+            )
+
+    def tags_for_asset(self, asset: dict) -> list[str]:
+        if not self._ANTHROPIC_API_KEY:
+            return []
+
+        if (asset.get("type") or "").upper() != "IMAGE":
+            return []
+
+        asset_id: str = asset.get("id", "")
+        if not asset_id:
+            return []
+
+        image_data = self._fetch_thumbnail(asset_id)
+        if not image_data:
+            return []
+
+        labels = self._analyse(image_data)
+        logger.debug("Object tags for %s: %s", asset_id, labels)
+        return [f"object/{label}" for label in labels]
+
+    def _fetch_thumbnail(self, asset_id: str) -> bytes | None:
+        url = f"{self._IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview"
+        try:
+            resp = requests.get(
+                url,
+                headers={"x-api-key": self._IMMICH_API_KEY},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not fetch thumbnail for %s: %s", asset_id, exc)
+            return None
+
+    def _analyse(self, image_data: bytes) -> list[str]:
+        b64 = base64.standard_b64encode(image_data).decode()
+        payload = {
+            "model": self._MODEL,
+            "max_tokens": 128,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": self._PROMPT.format(max_labels=self._MAX_LABELS),
+                        },
+                    ],
+                }
+            ],
+        }
+        headers = {
+            "x-api-key": self._ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        try:
+            resp = requests.post(
+                self._ANTHROPIC_URL,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            raw: str = resp.json().get("content", [{}])[0].get("text", "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Claude vision call failed: %s", exc)
+            return []
+
+        labels = [lbl.strip().lower() for lbl in raw.split(",") if lbl.strip()]
+        labels = [lbl for lbl in labels if len(lbl.split()) <= 3]
+        return labels[: self._MAX_LABELS]
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +470,12 @@ class AssetTagger:
             DateTagStrategy(),
             LocationTagStrategy(),
             FaceTagStrategy(),
+            CameraTagStrategy(),
+            SeasonTagStrategy(),
+            DayOfWeekTagStrategy(),
+            MediaTypeTagStrategy(),
+            FileFormatTagStrategy(),
+            ObjectTagStrategy(),
         ]
 
     def tags_for_asset(self, asset: dict) -> list[str]:
@@ -194,7 +490,6 @@ class AssetTagger:
                     asset.get("id"),
                     exc,
                 )
-        # Deduplicate while preserving order
         seen: set[str] = set()
         result: list[str] = []
         for t in all_tags:

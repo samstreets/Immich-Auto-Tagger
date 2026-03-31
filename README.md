@@ -3,67 +3,49 @@
 A lightweight Dockerised background service that automatically applies
 hierarchical tags to every asset in your [Immich](https://immich.app) library.
 
+[![Docker Hub](https://img.shields.io/docker/v/samuelstreets/immich-auto-tagger?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/samuelstreets/immich-auto-tagger)
+[![Build & Push](https://github.com/samuelstreets/immich-auto-tagger/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/samuelstreets/immich-auto-tagger/actions/workflows/docker-publish.yml)
+
 ## Tags produced
 
-| Strategy   | Example tag                                       |
-|------------|---------------------------------------------------|
-| Date       | `date/2024`, `date/2024/03`, `date/2024/03/15`    |
-| Location   | `location/Europe/United Kingdom/Warwickshire/Warwick` |
-| People     | `people/Jeff`, `people/Sarah`                     |
+| Strategy    | Example tag                                            |
+|-------------|--------------------------------------------------------|
+| Date        | `date/2024`, `date/2024/03`, `date/2024/03/15`         |
+| Location    | `location/United Kingdom/England/Warwick`              |
+| People      | `people/Jeff`, `people/Sarah`                          |
+| Camera      | `camera/Sony/ILCE-7M4`, `camera/Apple/iPhone 15 Pro`   |
+| Season      | `season/Autumn`, `season/Summer`                       |
+| Day         | `day/Saturday`, `day/weekend`                          |
+| Media type  | `type/photo`, `type/video`, `type/live-photo`          |
+| File format | `format/JPEG`, `format/ARW`, `format/RAW`              |
+| Objects     | `object/dog`, `object/aeroplane`, `object/sunset`      |
 
 ---
 
 ## Quick start
 
-### 1. Clone / copy the `auto-tagger/` folder
+### 1. Create `.env` in your stack root
 
-```
-your-immich-stack/
-├── docker-compose.yml          ← your existing Immich compose
-└── auto-tagger/
-    ├── main.py
-    ├── immich_api.py
-    ├── geotag.py
-    ├── tagger.py
-    ├── scheduler.py
-    ├── facemap.yaml            ← edit this with your face mappings
-    ├── requirements.txt
-    └── Dockerfile
+```env
+IMMICH_API_KEY=your_api_key_here
+
+# Optional — enables AI object/scene tagging
+# ANTHROPIC_API_KEY=your_anthropic_key_here
 ```
 
 ### 2. Get your Immich API key
 
 1. Open Immich → **Account Settings** → **API Keys** → **New API Key**
-2. Copy the key.
+2. Copy the key into `.env`.
 
-### 3. Create `.env` in your stack root
+### 3. Add the service to your compose file
 
-```env
-IMMICH_API_KEY=your_api_key_here
-```
+Copy the `immich-auto-tagger` service block below into your existing
+`docker-compose.yml`, or use this file standalone.
 
-### 4. Merge the compose snippet
+The image is pulled automatically from Docker Hub — no build step required.
 
-If you already have Immich running, copy the `immich-auto-tagger` service
-block from `auto-tagger/docker-compose.yml` into your existing
-`docker-compose.yml`.
-
-Or use the provided complete `docker-compose.yml` in this folder.
-
-### 5. Map people to names (optional)
-
-Edit `auto-tagger/facemap.yaml`:
-
-```yaml
-# Get person IDs from the Immich UI: Explore → People → click a person → copy UUID from URL
-3f2c8a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c: Jeff
-a1b2c3d4-e5f6-7890-abcd-ef1234567890: Sarah
-```
-
-Changes to `facemap.yaml` take effect on the **next scheduled run** without
-rebuilding the container (the file is bind-mounted).
-
-### 6. Start the service
+### 4. Start the service
 
 ```bash
 docker compose up -d immich-auto-tagger
@@ -79,44 +61,43 @@ docker compose logs -f immich-auto-tagger
 
 ## Environment variables
 
-| Variable                  | Default                                        | Description                                           |
-|---------------------------|------------------------------------------------|-------------------------------------------------------|
-| `IMMICH_URL`              | *(required)*                                   | Base URL of your Immich server                        |
-| `IMMICH_API_KEY`          | *(required)*                                   | Immich API key                                        |
-| `SCAN_INTERVAL_MINUTES`   | `15`                                           | How often to poll for new/updated assets              |
-| `SCAN_PAGE_SIZE`          | `100`                                          | Assets per API page                                   |
-| `INITIAL_SCAN_DAYS`       | `0`                                            | On first run, only scan assets updated in last N days (0 = all) |
-| `NOMINATIM_USER_AGENT`    | `immich-auto-tagger/1.0 (self-hosted)`         | Sent with every Nominatim request                     |
-| `NOMINATIM_URL`           | `https://nominatim.openstreetmap.org`          | Override with self-hosted Nominatim                   |
-| `FACEMAP_PATH`            | `/app/facemap.yaml`                            | Path to the face-name mapping file inside container   |
-| `STATE_FILE`              | `/app/state/last_run.json`                     | Persists last-run timestamp across restarts           |
-| `IMMICH_TIMEOUT`          | `30`                                           | HTTP timeout (seconds) for Immich API calls           |
+| Variable                  | Default                | Description                                                    |
+|---------------------------|------------------------|----------------------------------------------------------------|
+| `IMMICH_URL`              | *(required)*           | Base URL of your Immich server                                 |
+| `IMMICH_API_KEY`          | *(required)*           | Immich API key                                                 |
+| `SCAN_INTERVAL_MINUTES`   | `15`                   | How often to poll for new/updated assets                       |
+| `SCAN_PAGE_SIZE`          | `100`                  | Assets per API page                                            |
+| `INITIAL_SCAN_DAYS`       | `0`                    | On first run, only scan assets updated in last N days (0 = all)|
+| `STATE_FILE`              | `/app/state/last_run.json` | Persists last-run timestamp across restarts               |
+| `IMMICH_TIMEOUT`          | `30`                   | HTTP timeout (seconds) for Immich API calls                    |
+| `ANTHROPIC_API_KEY`       | *(unset)*              | Enables AI object tagging — omit to disable                    |
+| `OBJECT_TAG_MAX_LABELS`   | `5`                    | Max object/scene labels produced per photo                     |
 
 ---
 
-## Self-hosted Nominatim (recommended for large libraries)
+## Object tagging (AI-powered)
 
-If you have thousands of geotagged photos, the public Nominatim service may
-rate-limit you.  Run your own:
+When `ANTHROPIC_API_KEY` is set the service sends each photo's preview
+thumbnail to the Claude Vision API and tags it with the subjects it detects
+(e.g. `object/dog`, `object/beach`, `object/bicycle`).
 
-```yaml
-# add to docker-compose.yml
-nominatim:
-  image: mediagis/nominatim:4.4
-  environment:
-    PBF_URL: https://download.geofabrik.de/europe/great-britain-latest.osm.pbf
-    REPLICATION_URL: https://planet.openstreetmap.org/replication/hour/
-  volumes:
-    - nominatim-data:/var/lib/postgresql/14/main
-  networks:
-    - immich-net
+No extra packages are required — the integration uses plain HTTP via the
+`requests` library that is already installed.
+
+To enable, add to your `.env`:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Then set:
+And uncomment the line in `docker-compose.yml`:
 
 ```yaml
-NOMINATIM_URL: "http://nominatim:8080"
+ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
 ```
+
+Object tagging is silently skipped for video assets and if the key is absent,
+so all other strategies continue to work regardless.
 
 ---
 
@@ -158,11 +139,33 @@ main.py
        └─ tagger.py        AssetTagger — runs all strategies
             ├─ DateTagStrategy
             ├─ LocationTagStrategy
-            │    └─ geotag.py  Nominatim reverse-geocoding + LRU cache
-            └─ FaceTagStrategy
-                 └─ facemap.yaml
+            ├─ FaceTagStrategy
+            ├─ CameraTagStrategy
+            ├─ SeasonTagStrategy
+            ├─ DayOfWeekTagStrategy
+            ├─ MediaTypeTagStrategy
+            ├─ FileFormatTagStrategy
+            └─ ObjectTagStrategy  (Claude Vision, plain HTTP)
        └─ immich_api.py    HTTP client for Immich REST API
 ```
+
+---
+
+## Docker Hub
+
+The image is built and published automatically by GitHub Actions on every
+push to `main` and on version tags.
+
+```bash
+# Latest
+docker pull samuelstreets/immich-auto-tagger:latest
+
+# Specific release
+docker pull samuelstreets/immich-auto-tagger:v1.0.0
+```
+
+Images are built for both `linux/amd64` and `linux/arm64` (Raspberry Pi /
+Apple Silicon).
 
 ---
 
@@ -173,5 +176,6 @@ main.py
 | `KeyError: 'IMMICH_URL'` | Set the env variable in docker-compose or `.env` |
 | Tags not appearing | Check that the API key has **write** permissions |
 | Geocoding always empty | Ensure the container can reach `nominatim.openstreetmap.org` or your self-hosted instance |
-| Face tags missing | Verify UUIDs in `facemap.yaml` match Immich person IDs |
+| Face tags missing | Verify person names are set in the Immich UI (Explore → People) |
+| Object tags missing | Check `ANTHROPIC_API_KEY` is set and the container can reach `api.anthropic.com` |
 | Service keeps re-scanning all assets | The `tagger-state` volume is not persisted — check volume mounts |

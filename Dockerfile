@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Immich Auto-Tagger — Dockerfile
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.14.4-slim
 
 LABEL maintainer="you@example.com"
 LABEL description="Automatically tags Immich assets with people, location and date hierarchies."

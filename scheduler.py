@@ -32,6 +32,13 @@ _STATE_FILE = Path(os.environ.get("STATE_FILE", "/app/state/last_run.json"))
 _INITIAL_SCAN_DAYS = int(os.environ.get("INITIAL_SCAN_DAYS", "0"))
 # 0 = scan ALL assets on first run; >0 = only scan assets updated in last N days
 
+# Tag prefixes that this service "owns" — stale tags under these prefixes
+# will be removed automatically.  Manually applied tags are never touched.
+_MANAGED_PREFIXES = (
+    "date/", "season/", "day/", "location/",
+    "people/", "camera/", "type/", "format/", "object/",
+)
+
 # ---------------------------------------------------------------------------
 # State persistence
 # ---------------------------------------------------------------------------
@@ -97,6 +104,7 @@ def _run_tagging_job() -> None:
     page = 1
     total_assets = 0
     total_tagged = 0
+    total_removed = 0
 
     _, grand_total = immich_api.search_assets(
         page=1, page_size=1, updated_after=updated_after
@@ -116,12 +124,48 @@ def _run_tagging_job() -> None:
 
         for asset in assets:
             asset_id: str = asset["id"]
-            tags = _tagger.tags_for_asset(asset)
+            new_tags = set(_tagger.tags_for_asset(asset))
 
-            if not tags:
-                continue
+            # ------------------------------------------------------------------
+            # Fetch tags already on this asset and identify stale ones.
+            # We only remove tags under prefixes this service manages — manually
+            # applied tags are never touched.
+            # ------------------------------------------------------------------
+            try:
+                current_asset_tags = immich_api.get_asset_tags(asset_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Could not fetch current tags for asset %s: %s", asset_id, exc
+                )
+                current_asset_tags = []
 
-            for tag_value in tags:
+            current_managed: dict[str, str] = {
+                t["value"]: t["id"]
+                for t in current_asset_tags
+                if t.get("value", "").startswith(_MANAGED_PREFIXES)
+            }
+
+            stale_tags = set(current_managed.keys()) - new_tags
+
+            # Remove stale tags
+            for stale_value in stale_tags:
+                try:
+                    stale_id = current_managed[stale_value]
+                    immich_api.remove_tags_from_asset(stale_id, [asset_id])
+                    logger.info(
+                        "Removed stale tag '%s' from asset %s.", stale_value, asset_id
+                    )
+                    total_removed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "Failed to remove stale tag '%s' from asset %s: %s",
+                        stale_value,
+                        asset_id,
+                        exc,
+                    )
+
+            # Apply new/updated tags
+            for tag_value in new_tags:
                 try:
                     tag_id = immich_api.upsert_tag(tag_value, existing_tags)
                     immich_api.apply_tags_to_assets(tag_id, [asset_id])
@@ -147,9 +191,11 @@ def _run_tagging_job() -> None:
     _save_state(state)
 
     logger.info(
-        "✔  Tagging job complete — %d asset(s) processed, %d tag application(s).",
+        "✔  Tagging job complete — %d asset(s) processed, "
+        "%d tag application(s), %d stale tag(s) removed.",
         total_assets,
         total_tagged,
+        total_removed,
     )
 
 

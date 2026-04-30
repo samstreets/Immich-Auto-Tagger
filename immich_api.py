@@ -102,6 +102,12 @@ def get_asset(asset_id: str) -> dict:
     return _get(f"/api/assets/{asset_id}")
 
 
+def get_asset_tags(asset_id: str) -> list[dict]:
+    """Return the list of tags currently applied to an asset."""
+    asset = get_asset(asset_id)
+    return asset.get("tags") or []
+
+
 # ---------------------------------------------------------------------------
 # Tag endpoints
 # ---------------------------------------------------------------------------
@@ -200,6 +206,14 @@ def apply_tags_to_assets(tag_id: str, asset_ids: list[str]) -> None:
     """Associate `tag_id` with every asset in `asset_ids`."""
     _put(f"/api/tags/{tag_id}/assets", {"ids": asset_ids})
     logger.debug("Applied tag %s to %d asset(s).", tag_id, len(asset_ids))
+
+
+def remove_tags_from_asset(tag_id: str, asset_ids: list[str]) -> None:
+    """Detach `tag_id` from every asset in `asset_ids`."""
+    url = f"{IMMICH_URL}/api/tags/{tag_id}/assets"
+    resp = _SESSION.delete(url, json={"ids": asset_ids}, timeout=_DEFAULT_TIMEOUT)
+    resp.raise_for_status()
+    logger.debug("Removed tag %s from %d asset(s).", tag_id, len(asset_ids))
 
 
 # ---------------------------------------------------------------------------
